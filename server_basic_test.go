@@ -1,7 +1,10 @@
-package msgserv
+// Test package for the tlvserv package.  Set environment variable
+// TLV_SERVER_ADDR to "address:port" prior to running "go test"
+package tlvserv_test
 
 import (
 	"bytes"
+	"github.com/pdmorrow/tlvserv"
 	"log"
 	"net"
 	"os"
@@ -11,52 +14,57 @@ import (
 )
 
 const (
-	MTYPE_HELLO uint16 = 1
-	MTYPE_ECHO  uint16 = 2
-	MTYPE_TEST1 uint16 = 3
-	MTYPE_TEST2 uint16 = 4
+	mtypeHello tlvserv.MTypeID = tlvserv.MTypeIDUserStart
+	mtypeEcho  tlvserv.MTypeID = iota
+	mtypeReps  tlvserv.MTypeID = iota
 )
 
-const (
-	TEST1_REPS = 1000
-)
+const testReps = 1000
 
-type HandlerStatus struct {
-	mtype uint16
+type handlerStatus struct {
+	mtype tlvserv.MTypeID
 	err   error
 }
 
-var msgServer *MsgServ
-var statusChan chan HandlerStatus
+var msgServer *tlvserv.TLVServ
+var statusChan chan handlerStatus
 var test1Reps = 0
 var test1Lock sync.RWMutex
+var hostAndPort string
 
+// handleHello handles a message type of mtypeHello.  It unblocks the status
+// channel when the routine completes.
 func handleHello(conn net.Conn, data []byte) {
-	var hs HandlerStatus
+	var hs handlerStatus
 
-	hs.mtype = MTYPE_HELLO
+	hs.mtype = mtypeHello
 	hs.err = nil
 	statusChan <- hs
 }
 
+// handleEcho handles a message type of mtypeEcho.  It echos back the data
+// received in the data parameter then  unblocks the status channel when the
+// routine completes.
 func handleEcho(conn net.Conn, data []byte) {
-	var hs HandlerStatus
+	var hs handlerStatus
 
 	conn.Write(data)
-	hs.mtype = MTYPE_ECHO
+	hs.mtype = mtypeEcho
 	hs.err = nil
 	statusChan <- hs
 }
 
-func handleTest1(conn net.Conn, data []byte) {
+// handleReps handles a message of type mtypeReps.  Once the number messages
+// received of this type reaches testReps then status channel is unblocked.
+func handleReps(conn net.Conn, data []byte) {
 	test1Lock.Lock()
 	test1Reps++
 
-	if test1Reps == TEST1_REPS {
-		var hs HandlerStatus
+	if test1Reps == testReps {
+		var hs handlerStatus
 
 		test1Reps = 0
-		hs.mtype = MTYPE_TEST1
+		hs.mtype = mtypeReps
 		hs.err = nil
 		statusChan <- hs
 	}
@@ -64,26 +72,39 @@ func handleTest1(conn net.Conn, data []byte) {
 	test1Lock.Unlock()
 }
 
-func startServer() *MsgServ {
+// ExampleServer() starts a test server on address:port TLV_SERVER_ADDR.
+func ExampleServer() *tlvserv.TLVServ {
 
-	serv, err := MessageServer(
-		"tcp",
-		":8080",
-		map[uint16]func(net.Conn, []byte){
-			MTYPE_HELLO: handleHello,
-			MTYPE_ECHO:  handleEcho,
-			MTYPE_TEST1: handleTest1,
-		})
+	hostAndPort, ok := os.LookupEnv("TLV_SERVER_ADDR")
+	if ok == true {
+		serv, err := tlvserv.Server(
+			// "network"
+			"tcp",
+			// address:port
+			hostAndPort,
+			// Read timeout for reading payloads.
+			time.Duration(5*time.Second),
+			// Map of types to message handler.
+			map[tlvserv.MTypeID]func(net.Conn, []byte){
+				mtypeHello: handleHello,
+				mtypeEcho:  handleEcho,
+				mtypeReps:  handleReps,
+			})
 
-	if err != nil {
-		log.Fatal(err)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		return serv
+	} else {
+		log.Fatalf("TLV_SERVER_ADDR is not set")
 	}
 
-	return serv
+	return nil
 }
 
 // writeHdr writes the contents of a message header to conn.
-func writeHdr(conn net.Conn, mtype uint16, datalen uint16) (int, error) {
+func writeHdr(conn net.Conn, mtype tlvserv.MTypeID, datalen uint16) (int, error) {
 	header := make([]byte, 4)
 
 	header[0] = byte(mtype)
@@ -114,11 +135,11 @@ func readResponse(conn net.Conn, datalen uint16) ([]byte, error) {
 
 // TestMain is called in the main thread prior to any
 func TestMain(m *testing.M) {
-	msgServer = startServer()
+	msgServer = ExampleServer()
 	if msgServer != nil {
 		// Create a channel for signalling test success or failure from
 		// message handler routines.
-		statusChan = make(chan HandlerStatus)
+		statusChan = make(chan handlerStatus)
 		// Run all the tests.
 		code := m.Run()
 		// Exit.
@@ -131,8 +152,8 @@ func TestMain(m *testing.M) {
 func TestStats(t *testing.T) {
 	conn, err := net.Dial("tcp", ":8080")
 	if err == nil {
-		for i := 0; i < 1000; i++ {
-			writeHdr(conn, MTYPE_HELLO, 0)
+		for i := 0; i < testReps; i++ {
+			writeHdr(conn, mtypeHello, 0)
 			// Wait for completion of the message.
 			select {
 			case sm := <-statusChan:
@@ -144,13 +165,14 @@ func TestStats(t *testing.T) {
 			}
 		}
 
-		stats := msgServer.GetStats(MTYPE_HELLO)
+		stats := msgServer.GetStats(mtypeHello)
 		if stats == nil {
-			t.Errorf("couldn't get stats for type MTYPE_HELLO(%v)\n",
-				MTYPE_HELLO)
+			t.Errorf("couldn't get stats for type mtypeHello(%v)\n",
+				mtypeHello)
 		} else {
-			if stats.calls != 1000 {
-				t.Errorf("expected 1000 calls, only got %v\n", stats.calls)
+			if stats.NrCalls != testReps {
+				t.Errorf("expected %v calls, only got %v\n",
+					testReps, stats.NrCalls)
 			}
 		}
 
@@ -160,11 +182,33 @@ func TestStats(t *testing.T) {
 	}
 }
 
-// TestHelloMsg connects to the server and send a hello message.
-func TestHelloMsg(t *testing.T) {
+func TestInvalidDataLen(t *testing.T) {
 	conn, err := net.Dial("tcp", ":8080")
 	if err == nil {
-		writeHdr(conn, MTYPE_HELLO, 0)
+		// Send a mtypeHello message with a data length of 2, but don't
+		// send any data.
+		writeHdr(conn, mtypeHello, 2)
+		select {
+		case sm := <-statusChan:
+			if sm.err != nil {
+				t.Error(sm.err)
+			} else {
+				t.Error("handler should not have been invoked")
+			}
+
+		case <-time.After(10 * time.Second):
+		}
+
+		conn.Close()
+	} else {
+		t.Errorf("couldn't connect to server: %v\n", err)
+	}
+}
+
+func Test2Msgs(t *testing.T) {
+	conn, err := net.Dial("tcp", ":8080")
+	if err == nil {
+		writeHdr(conn, mtypeHello, 0)
 		select {
 		case sm := <-statusChan:
 			if sm.err != nil {
@@ -182,17 +226,52 @@ func TestHelloMsg(t *testing.T) {
 }
 
 // TestHelloMsg connects to the server and send a hello message.
-func TestRepetitionMsg(t *testing.T) {
+func TestHelloMsg(t *testing.T) {
 	conn, err := net.Dial("tcp", ":8080")
 	if err == nil {
-		for rep := 0; rep < TEST1_REPS; rep++ {
-			writeHdr(conn, MTYPE_TEST1, 0)
-		}
-
+		writeHdr(conn, mtypeHello, 0)
 		select {
 		case sm := <-statusChan:
 			if sm.err != nil {
 				t.Error(sm.err)
+			}
+
+		case <-time.After(10 * time.Millisecond):
+			t.Errorf("timeout")
+		}
+
+		conn.Close()
+	} else {
+		t.Errorf("couldn't connect to server: %v\n", err)
+	}
+}
+
+// TestHelloMsg connects to the server and send a REPS message testReps times.
+func TestRepetitionMsg(t *testing.T) {
+	conn, err := net.Dial("tcp", ":8080")
+	if err == nil {
+		// Send testReps messages.
+		for rep := 0; rep < testReps; rep++ {
+			writeHdr(conn, mtypeReps, 0)
+		}
+
+		// Wait till the the handler function for mtypeReps is called
+		// testReps times, or timeout after 1 second.
+		select {
+		case sm := <-statusChan:
+			if sm.err != nil {
+				t.Error(sm.err)
+			} else {
+				stats := msgServer.GetStats(mtypeReps)
+				if stats == nil {
+					t.Errorf("couldn't get stats for type mtypeReps(%v)\n",
+						mtypeReps)
+				} else {
+					if stats.NrCalls != testReps {
+						t.Errorf("expected %v calls, only got %v\n",
+							testReps, stats.NrCalls)
+					}
+				}
 			}
 
 		case <-time.After(1 * time.Second):
@@ -212,18 +291,31 @@ func TestEchoMsg(t *testing.T) {
 		// Send the "echo" command.
 		data := []byte("echodata")
 		datalen := uint16(len(data))
-		writeHdr(conn, MTYPE_ECHO, datalen)
+		writeHdr(conn, mtypeEcho, datalen)
 		conn.Write(data)
 
-		<-statusChan
-
-		resp, err := readResponse(conn, datalen)
-		if err != nil {
-			t.Error(err)
-		} else {
-			if bytes.Compare(data, resp) != 0 {
-				t.Errorf("\nresponse was: %v\nexpected: %v\n", resp, data)
+		// Wait 10 milliseconds before declaring an error, within 10ms
+		// the handler for mtypeEcho should have been called.
+		select {
+		case sm := <-statusChan:
+			if sm.err != nil {
+				t.Error(sm.err)
+			} else {
+				// Handler has been called, we should be able to read the
+				// response now.
+				resp, err := readResponse(conn, datalen)
+				if err != nil {
+					t.Error(err)
+				} else {
+					if bytes.Compare(data, resp) != 0 {
+						t.Errorf("\nresponse was: %v\nexpected: %v\n",
+							resp, data)
+					}
+				}
 			}
+
+		case <-time.After(10 * time.Millisecond):
+			t.Errorf("timeout")
 		}
 
 		conn.Close()
