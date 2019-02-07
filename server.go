@@ -200,11 +200,13 @@ func (ms *TLVServ) GetStats(mtype MTypeID) *MTypeIDStats {
 }
 
 // Server() creates a new message server listening on the address specified
-// in the address parameter and on address family specified in the network
+// in the address parameter and on network type specified in the network
 // argument.  The handlers map is a map from a message type to a handler
 // function, the handler function for a given message type is called when a
 // message of that type is received.  This function does not return but
 // continually handles messages using non-blocking I/O.
+//
+// Known networks are "tcp", "tcp4" (IPv4-only), "tcp6" (IPv6-only),
 func Server(network string,
 	address string,
 	readTimeout time.Duration,
